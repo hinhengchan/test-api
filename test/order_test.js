@@ -27,6 +27,12 @@ describe('Order', function () {
         COMPLETED: "COMPLETED",
         CANCELLED: "CANCELLED"
     };
+    // api action
+    const ACTION = {
+        TAKE : "take",
+        COMPLETE: "complete",
+        CANCEL: "cancel"
+    };
 
     // set max number of retry for each test to account for Service Unavailability
     this.retries(RETRY);
@@ -55,6 +61,31 @@ describe('Order', function () {
 
         return latLng;
     };
+
+    /**
+      * @desc get corresponding action from STATUS
+      * @param STATUS $status - one of the statuses
+      * @return string - corresponding action
+    **/
+    function getActionFromStatus(status) {
+        var action = ACTION.CANCEL;
+
+        switch(status) {
+            case STATUS.ONGOING:
+                action = ACTION.TAKE;
+                break;
+            case STATUS.COMPLETED:
+                action = ACTION.COMPLETE;
+                break;
+            case STATUS.CANCELLED:
+                action = ACTION.CANCEL;
+                break;
+            default:
+                action = ACTION.CANCEL;
+        }
+
+        return action;
+    }
 
     /**
       * @desc prepare for API payload
@@ -318,6 +349,63 @@ describe('Order', function () {
     };
 
     /**
+      * @desc make api call to create order and expect error
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $trip - trip object from api request payload
+      * @param int $expectedStatusCode - expected status code
+      * @param string $expectedErrorMessage - expected error message
+      * @return none
+    **/
+    function createOrderAndExpectError(done, trip, expectedStatusCode, expectedErrorMessage) {
+        api.post('/v1/orders')
+            .set('Accept', 'application/json')
+            .send(trip)
+            .ok(res => res.status == expectedStatusCode)
+            .then(res => {
+                // check status code
+                expect(res.statusCode).to.equal(expectedStatusCode);
+
+                // check error message
+                if (expectedErrorMessage) {
+                    expect(res.body.message).to.have.string(expectedErrorMessage);
+                }
+
+                done();
+            })
+            .catch(err => {
+                printError(done, err);
+            });
+    };
+
+    /**
+      * @desc make api call to put order (take, complete, or cancel) and expect error
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $order - order object return from api response
+      * @param ACTION $action - one of the actions for available
+      * @param int $expectedStatusCode - expected status code
+      * @param string $expectedErrorMessage - expected error message
+      * @return none
+    **/
+    function putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage) {
+        api.put('/v1/orders/' + order.id + '/' + action)
+            .ok(res => res.status == expectedStatusCode)
+            .then(res => {
+                // check status code
+                expect(res.statusCode).to.equal(expectedStatusCode);
+
+                // check error message
+                if (expectedErrorMessage) {
+                    expect(res.body.message).to.have.string(expectedErrorMessage);
+                }
+
+                done();
+            })
+            .catch(err => {
+                printError(done, err);
+            });
+    }
+
+    /**
       * @desc make api call to fetch order and validate
       * @param function $done - indicate test is completed (passed from higher level function)
       * @param object $order - order object from api response
@@ -382,21 +470,7 @@ describe('Order', function () {
       * @return none
     **/
     function putOrder(done, order, status, validate) {
-        var action = 'cancel';
-
-        switch(status) {
-            case STATUS.ONGOING:
-                action = 'take';
-                break;
-            case STATUS.COMPLETED:
-                action = 'complete';
-                break;
-            case STATUS.CANCELLED:
-                action = 'cancel';
-                break;
-            default:
-                action = 'cancel';
-        }
+        var action = getActionFromStatus(status);
 
         api.put('/v1/orders/' + order.id + '/' + action)
             .set('Accept', 'application/json')
@@ -449,24 +523,10 @@ describe('Order', function () {
 
         it('should fail to create order if only one stop', function(done) {
             var trip = prepareTrip(0, null);
+            var expectedStatusCode = 400;
+            var expectedErrorMessage = 'error in field(s): stops';
 
-            api.post('/v1/orders')
-                .set('Accept', 'application/json')
-                .send(trip)
-                .ok(res => res.status == 400)
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(400);
-
-                    // check error message
-                    expect(res.body.message).to.have.string('error');
-                    expect(res.body.message).to.have.string('stops');
-
-                    done();
-                })
-                .catch(err => {
-                    printError(done, err);
-                });
+            createOrderAndExpectError(done, trip, expectedStatusCode, expectedErrorMessage);
         });
 
         it('should fail to create order if lat/lng is invalid', function(done) {
@@ -476,41 +536,18 @@ describe('Order', function () {
             };
 
             var trip = prepareTrip(null, null, invalidLatLng);
+            var expectedStatusCode = 503;
+            var expectedErrorMessage = 'Service Unavailable';
 
-            api.post('/v1/orders')
-                .set('Accept', 'application/json')
-                .send(trip)
-                .ok(res => res.status == 503)
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(503);
-
-                    // check error message
-                    expect(res.body.message).to.have.string('Service Unavailable');
-
-                    done();
-                })
-                .catch(err => {
-                    printError(done, err);
-                });
+            createOrderAndExpectError(done, trip, expectedStatusCode, expectedErrorMessage);
         });
 
         it('should fail to create order if payload is missing', function(done) {
-            api.post('/v1/orders')
-                .set('Accept', 'application/json')
-                .ok(res => res.status == 400)
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(400);
+            var trip = '';
+            var expectedStatusCode = 400;
+            var expectedErrorMessage = '';
 
-                    // check error message
-                    expect(res.body.message).to.be.a('string').that.is.empty;
-
-                    done();
-                })
-                .catch(err => {
-                    printError(done, err);
-                });
+            createOrderAndExpectError(done, trip, expectedStatusCode, expectedErrorMessage);
         });
     });
 
@@ -576,6 +613,9 @@ describe('Order', function () {
     describe('PUT /v1/orders/{orderID}/take', function () {
         var trip = prepareTrip(null, null);
         var isSurcharge = null;
+        var expectedStatusCode = 422;
+        var expectedErrorMessage = 'not ASSIGNING';
+        var action = ACTION.TAKE;
 
         it('should take order successfully if order is ASSIGNING and return correct fields and types', function(done) {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
@@ -583,42 +623,10 @@ describe('Order', function () {
             });
         });
 
-        it('should fail to take order if order does not exist', function(done) {
-            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
-                api.put('/v1/orders/' + order.id + 1 + '/take')
-                    .ok(res => res.status == 404)
-                    .then(res => {
-                        // check status code
-                        expect(res.statusCode).to.equal(404);
-
-                        // check error message
-                        expect(res.body.message).to.have.string('ORDER_NOT_FOUND');
-
-                        done();
-                    })
-                    .catch(err => {
-                        printError(done, err);
-                    });
-            });
-        });
-
         it('should fail to take order if order is already ONGOING', function(done) {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
                 takeOrderAndValidate(done, order, function(done, res, order, status) {
-                    api.put('/v1/orders/' + order.id + '/take')
-                        .ok(res => res.status == 422)
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(422);
-
-                            // check error message
-                            expect(res.body.message).to.have.string('not ASSIGNING');
-
-                            done();
-                        })
-                        .catch(err => {
-                            printError(done, err);
-                        });
+                    putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
                 });
             });
         });
@@ -626,20 +634,7 @@ describe('Order', function () {
         it('should fail to take order if order is CANCELLED', function(done) {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
                 cancelOrderAndValidate(done, order, function(done, res, order, status) {
-                    api.put('/v1/orders/' + order.id + '/take')
-                        .ok(res => res.status == 422)
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(422);
-
-                            // check error message
-                            expect(res.body.message).to.have.string('not ASSIGNING');
-
-                            done();
-                        })
-                        .catch(err => {
-                            printError(done, err);
-                        });
+                    putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
                 });
             });
         });
@@ -648,24 +643,20 @@ describe('Order', function () {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
                 takeOrderAndValidate(done, order, function(done, res, order, status){
                     completeOrderAndValidate(done, order, function(done, res, order, status){
-                        api.put('/v1/orders/' + order.id + '/take')
-                            .ok(res => res.status == 422)
-                            .then(res => {
-                                // check status code
-                                expect(res.statusCode).to.equal(422);
-
-                                // check error message
-                                expect(res.body.message).to.have.string('not ASSIGNING');
-
-                                done();
-                            })
-                            .catch(err => {
-                                printError(done, err);
-                            });
+                        putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
                     });
                 });
             });
+        });
 
+        it('should fail to take order if order does not exist', function(done) {
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                order.id += 1;
+                var expectedStatusCode = 404;
+                var expectedErrorMessage = 'ORDER_NOT_FOUND';
+
+                putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
+            });
         });
     });
 
@@ -675,6 +666,9 @@ describe('Order', function () {
     describe('PUT /v1/orders/{orderID}/complete', function () {
         var trip = prepareTrip(null, null);
         var isSurcharge = null;
+        var expectedStatusCode = 422;
+        var expectedErrorMessage = 'not ONGOING';
+        var action = ACTION.COMPLETE;
 
         it('should complete order successfully if order is ONGOING and return correct fields and types', function(done) {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
@@ -684,64 +678,16 @@ describe('Order', function () {
             });
         });
 
-        it('should fail to complete order if order does not exist', function(done) {
-            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
-                api.put('/v1/orders/' + order.id + 1 + '/complete')
-                    .set('Accept', 'application/json')
-                    .ok(res => res.status == 404)
-                    .then(res => {
-                        // check status code
-                        expect(res.statusCode).to.equal(404);
-
-                        // check error message
-                        expect(res.body.message).to.have.string('ORDER_NOT_FOUND');
-
-                        done();
-                    })
-                    .catch(err => {
-                        printError(done, err);
-                    });
-            });
-        });
-
         it('should fail to complete order if order is ASSIGNING', function(done) {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
-                api.put('/v1/orders/' + order.id + '/complete')
-                    .set('Accept', 'application/json')
-                    .ok(res => res.status == 422)
-                    .then(res => {
-                        // check status code
-                        expect(res.statusCode).to.equal(422);
-
-                        // check error message
-                        expect(res.body.message).to.have.string('not ONGOING');
-
-                        done();
-                    })
-                    .catch(err => {
-                        printError(done, err);
-                    });
+                putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
             });
         });
 
         it('should fail to complete order if order is CANCELLED', function(done) {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
                 cancelOrderAndValidate(done, order, function(done, res, order, status){
-                    api.put('/v1/orders/' + order.id + '/complete')
-                        .set('Accept', 'application/json')
-                        .ok(res => res.status == 422)
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(422);
-
-                            // check error message
-                            expect(res.body.message).to.have.string('not ONGOING');
-
-                            done();
-                        })
-                        .catch(err => {
-                            printError(done, err);
-                        });
+                    putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
                 });
             });
         });
@@ -750,23 +696,19 @@ describe('Order', function () {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
                 takeOrderAndValidate(done, order, function(done, res, order, status){
                     completeOrderAndValidate(done, order, function(done, res, order, status){
-                        api.put('/v1/orders/' + order.id + '/complete')
-                            .set('Accept', 'application/json')
-                            .ok(res => res.status == 422)
-                            .then(res => {
-                                // check status code
-                                expect(res.statusCode).to.equal(422);
-
-                                // check error message
-                                expect(res.body.message).to.have.string('not ONGOING');
-
-                                done();
-                            })
-                            .catch(err => {
-                                printError(done, err);
-                            });
+                        putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
                     });
                 });
+            });
+        });
+
+        it('should fail to complete order if order does not exist', function(done) {
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                order.id += 1;
+                var expectedStatusCode = 404;
+                var expectedErrorMessage = 'ORDER_NOT_FOUND';
+
+                putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
             });
         });
     });
@@ -777,6 +719,7 @@ describe('Order', function () {
     describe('PUT /v1/orders/{orderID}/cancel', function () {
         var trip = prepareTrip(null, null);
         var isSurcharge = null;
+        var action = ACTION.CANCEL;
 
         it('should cancel order successfully if order is ASSIGNING and return correct fields and types', function(done) {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
@@ -802,21 +745,11 @@ describe('Order', function () {
 
         it('should fail to cancel order if order does not exist', function(done) {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
-                api.put('/v1/orders/' + order.id + 1 + '/cancel')
-                    .set('Accept', 'application/json')
-                    .ok(res => res.status == 404)
-                    .then(res => {
-                        // check status code
-                        expect(res.statusCode).to.equal(404);
+                order.id += 1;
+                var expectedStatusCode = 404;
+                var expectedErrorMessage = 'ORDER_NOT_FOUND';
 
-                        // check error message
-                        expect(res.body.message).to.have.string('ORDER_NOT_FOUND');
-
-                        done();
-                    })
-                    .catch(err => {
-                        printError(done, err);
-                    });
+                putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
             });
         });
 
@@ -824,21 +757,10 @@ describe('Order', function () {
             createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
                 takeOrderAndValidate(done, order, function(done, res, order, status){
                     completeOrderAndValidate(done, order, function(done, res, order, status){
-                        api.put('/v1/orders/' + order.id + '/cancel')
-                            .set('Accept', 'application/json')
-                            .ok(res => res.status == 422)
-                            .then(res => {
-                                // check status code
-                                expect(res.statusCode).to.equal(422);
+                        var expectedStatusCode = 422;
+                        var expectedErrorMessage = 'COMPLETED already';
 
-                                // check error message
-                                expect(res.body.message).to.have.string('COMPLETED already');
-
-                                done();
-                            })
-                            .catch(err => {
-                                printError(done, err);
-                            });
+                        putOrderAndExpectError(done, order, action, expectedStatusCode, expectedErrorMessage);
                     });
                 });
             });
