@@ -1,0 +1,24 @@
+{
+    "name": "api-test",
+    "version": "1.0.0",
+    "description": "API Test",
+    "author": "Henry Chan",
+    "dependencies": {
+        "body-parser": "^1.17.1",
+        "chai": "^3.5.0",
+        "chai-arrays": "^2.0.0",
+        "mocha": "^5.2.0",
+        "moment-timezone": "^0.5.21",
+        "random-location": "^1.0.12",
+        "superagent": "^3.8.3"
+    },
+    "scripts": {
+        "prestart": "npm install;",
+        "start": "JUNIT_REPORT_PATH=test-result/result.xml JUNIT_REPORT_STACK=1 mocha --timeout 2500 --colors || true"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git@github.com:hinhengchan/api-test.git"
+    },
+    "license": "MIT"
+}
