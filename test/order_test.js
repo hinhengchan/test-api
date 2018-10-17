@@ -5,11 +5,10 @@ var chai = require('chai'),
     chai.use(assertArrays),
     randomLocation = require('random-location'),
     moment = require('moment-timezone'),
-    api = require('superagent');
+    supertest = require('supertest');
+    api = supertest('http://localhost:51544');
 
 describe('Order', function () {
-    // service endpoint
-    const ENDPOINT = 'http://localhost:51544';
     // office location - Lai Chi Kok
     const OFFICE = {
         latitude: 22.334600,
@@ -20,9 +19,16 @@ describe('Order', function () {
     // tolerance for amount calculation
     const TOLERANCE = 0.01;
     // retry x times
-    const RETRY = 3;
+    const RETRY = 1;
+    // order status
+    const STATUS = {
+        ASSIGNING : "ASSIGNING",
+        ONGOING: "ONGOING",
+        COMPLETED: "COMPLETED",
+        CANCELLED: "CANCELLED"
+    };
 
-    // set max number of retry for each test
+    // set max number of retry for each test to account for Service Unavailability
     this.retries(RETRY);
 
     /**
@@ -33,7 +39,7 @@ describe('Order', function () {
     **/
     function generateRandomInteger(min, max) {
         return Math.floor(min + Math.random()*(max + 1 - min))
-    }
+    };
 
     /**
       * @desc convert location with latitude/longitude to lat/lng
@@ -48,7 +54,7 @@ describe('Order', function () {
         delete latLng.longitude;
 
         return latLng;
-    }
+    };
 
     /**
       * @desc prepare for API payload
@@ -89,10 +95,12 @@ describe('Order', function () {
         }
 
         return trip;
-    }
+    };
 
     /**
-      * @desc check if fare amount is correct
+      * @desc check if fare amount is correct 
+      *     introduced tolerance as amount is sometimes off by 0.01 due to rounding
+      *     @TODO improve expected fare formula and remove tolerance
       * @param float $actualFareAmount - amount to be tested
       * @param int $totalDistance - sum of distance for the whole trip
       * @param bool $isSurcharge - is between 9pm - 5am
@@ -104,159 +112,360 @@ describe('Order', function () {
         // between 9pm - 5am
         var expectedFareAmountSurcharge = 30 + (totalDistance - 2000) / 200 * 8;
 
-        if (isSurcharge == null) {
-            // return true if match either amount
-            return Math.abs(actualFareAmount - expectedFareAmountNormal) < TOLERANCE || 
-                    Math.abs(actualFareAmount - expectedFareAmountSurcharge) < TOLERANCE;
-        } else if (isSurcharge) {
-            // return true if match surcharge amount
-            return Math.abs(actualFareAmount - expectedFareAmountSurcharge) < TOLERANCE;
-        } else {
-            // return true if match normal amount
-            return Math.abs(actualFareAmount - expectedFareAmountNormal) < TOLERANCE;
-        }
-    }
+        var diffNormal = Math.abs(actualFareAmount - expectedFareAmountNormal);
+        var diffSurcharge = Math.abs(actualFareAmount - expectedFareAmountSurcharge);
 
-    function createOrderAndValidate(done, trip, isSurcharge) {
-        api.post(ENDPOINT + '/v1/orders')
+        if (isSurcharge == null) {
+            // return true if match either amount within tolerance
+            return diffNormal < TOLERANCE || diffSurcharge < TOLERANCE;
+        } else if (isSurcharge) {
+            // return true if match surcharge amount within tolerance
+            return diffSurcharge < TOLERANCE;
+        } else {
+            // return true if match normal amount within tolerance
+            return diffNormal < TOLERANCE;
+        }
+    };
+
+    /**
+      * @desc print error message for debugging
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $err - err object that contains message
+      * @return none
+    **/
+    function printError(done, err) {
+        console.log('error: ' + err.message);
+        if (err) done(err);
+    };
+
+    /**
+      * @desc validate order (newly created) for each field and field type
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $res - api response (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param object $trip - trip object from api request payload
+      * @param bool $isSurcharge - is between 5am - 9pm
+      * @param STATUS $status - one of the statuses for assertion
+      * @return none
+    **/
+    function validateCreatedOrder(done, res, order, trip, isSurcharge, status) {
+        // check status code
+        expect(res.statusCode).to.equal(201);
+
+        // check all fields exist
+        expect(res.body).to.have.keys(['id', 'drivingDistancesInMeters', 'fare']);
+
+        // check id (int)
+        expect(res.body.id).to.be.a('number');
+
+        // check drivingDistancesInMeters
+        var totalDistance = 0;
+        expect(res.body.drivingDistancesInMeters).to.be.an('array');
+        for (var i in res.body.drivingDistancesInMeters) {
+            expect(res.body.drivingDistancesInMeters[i]).to.be.a('number');
+            totalDistance += res.body.drivingDistancesInMeters[i];
+        }
+
+        // check fare (object)
+        expect(res.body.fare).to.be.an('object')
+        expect(res.body.fare).to.have.property("amount");
+        expect(parseFloat(res.body.fare.amount)).to.be.a('number');
+        expect(checkFareAmount(parseFloat(res.body.fare.amount), totalDistance, isSurcharge)).to.be.true;
+        expect(res.body.fare).to.have.property("currency").and.to.be.a('string').and.to.equal('HKD');
+
+        done();
+    };
+
+    /**
+      * @desc validate order (fetched with any status) for each field and field type
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $res - api response (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param object $trip - trip object from api request payload
+      * @param bool $isSurcharge - is between 5am - 9pm
+      * @param STATUS $status - one of the statuses for assertion
+      * @return none
+    **/
+    function validateFetchedOrder(done, res, order, trip, isSurcharge, status) {
+        // check status code
+        expect(res.statusCode).to.equal(200);
+
+        // check all fields exist
+        expect(res.body).to.have.keys(['id', 'stops', 'drivingDistancesInMeters', 'fare', 'status', 'orderDateTime', 'createdTime']);
+
+        // check id (int)
+        expect(res.body.id).to.be.a('number').and.to.equal(order.id);
+
+        // check stops (array)
+        expect(res.body.stops).to.be.an('array');
+        expect(res.body.stops.length).to.equal(trip.stops.length);
+        for (var i in res.body.stops) {
+            expect(res.body.stops[i]).to.have.keys(['lat', 'lng']);
+            expect(res.body.stops[i].lat).to.be.a('number');
+            expect(res.body.stops[i].lng).to.be.a('number');
+        }
+
+        // check drivingDistancesInMeters (array)
+        var totalDistance = 0;
+        expect(res.body.drivingDistancesInMeters).to.be.an('array').and.to.be.equalTo(order.drivingDistancesInMeters);
+        for (var i in res.body.drivingDistancesInMeters) {
+            expect(res.body.drivingDistancesInMeters[i]).to.be.a('number').and.to.equal(order.drivingDistancesInMeters[i]);
+            totalDistance += res.body.drivingDistancesInMeters[i];
+        }
+
+        // check fare (object)
+        expect(res.body.fare).to.be.an('object')
+        expect(res.body.fare).to.have.property("amount");
+        expect(parseFloat(res.body.fare.amount)).to.be.a('number');
+        expect(checkFareAmount(parseFloat(res.body.fare.amount), totalDistance, isSurcharge)).to.be.true;
+        expect(res.body.fare).to.have.property("currency").and.to.be.a('string').and.to.equal('HKD');
+
+        // check status
+        expect(res.body.status).to.be.a('string').and.to.equal(status);
+
+        // check dateTime
+        var orderDateTime = new Date(res.body.orderDateTime);
+        var createdTime = new Date(res.body.createdTime);
+        expect(orderDateTime >= createdTime).to.be.true;
+
+        done();
+    };
+
+    /**
+      * @desc validate order (newly taken) for each field and field type
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $res - api response (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param STATUS $status - one of the statuses for assertion
+      * @return none
+    **/
+    function validateTakenOrder(done, res, order, status) {
+        var expectedKeys = ['id', 'status', 'ongoingTime'];
+        validateOrder(done, res, order, status, expectedKeys);
+    };
+
+    /**
+      * @desc validate order (newly completed) for each field and field type
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $res - api response (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param STATUS $status - one of the statuses for assertion
+      * @return none
+    **/
+    function validateCompletedOrder(done, res, order, status) {
+        var expectedKeys = ['id', 'status', 'completedAt'];
+        validateOrder(done, res, order, status, expectedKeys);
+    };
+
+    /**
+      * @desc validate order (newly cancelled) for each field and field type
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $res - api response (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param STATUS $status - one of the statuses for assertion
+      * @return none
+    **/
+    function validateCancelledOrder(done, res, order, status) {
+        var expectedKeys = ['id', 'status', 'cancelledAt'];
+        validateOrder(done, res, order, status, expectedKeys);
+    };
+
+    /**
+      * @desc validate order (newly taken, completed, or cancelled) for each field and field type
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $res - api response (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param STATUS $status - one of the statuses for assertion
+      * @param array $expectedKeys - attributes expected from api response
+      * @return none
+    **/
+    function validateOrder(done, res, order, status, expectedKeys) {
+        // check status code
+        expect(res.statusCode).to.equal(200);
+
+        // check all fields exist
+        expect(res.body).to.have.keys(expectedKeys);
+
+        // check id (int)
+        expect(res.body.id).to.be.a('number').and.to.equal(order.id);
+
+        // check status
+        expect(res.body.status).to.be.a('string').and.to.equal(status);
+
+        done();
+    };
+
+    /**
+      * @desc make api call to create order and validate
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $trip - trip object from api request payload
+      * @param bool $isSurcharge - is between 5am - 9pm
+      * @param function $validate - validation function to use
+      * @return none
+    **/
+    function createOrderAndValidate(done, trip, isSurcharge, validate) {
+        api.post('/v1/orders')
             .set('Accept', 'application/json')
             .send(trip)
             .then(res => {
-                // check status code
-                expect(res.statusCode).to.equal(201);
-
-                // check all fields exist
-                expect(res.body).to.have.keys(['id', 'drivingDistancesInMeters', 'fare']);
-
-                // check id (int)
-                expect(res.body.id).to.be.a('number');
-
-                // check drivingDistancesInMeters
-                var totalDistance = 0;
-                expect(res.body.drivingDistancesInMeters).to.be.an('array');
-                for (var i in res.body.drivingDistancesInMeters) {
-                    expect(res.body.drivingDistancesInMeters[i]).to.be.a('number');
-                    totalDistance += res.body.drivingDistancesInMeters[i];
-                }
-
-                // check fare (object)
-                expect(res.body.fare).to.be.an('object')
-                expect(res.body.fare).to.have.property("amount");
-                expect(parseFloat(res.body.fare.amount)).to.be.a('number');
-                expect(checkFareAmount(parseFloat(res.body.fare.amount), totalDistance, isSurcharge)).to.be.true;
-                expect(res.body.fare).to.have.property("currency").and.to.be.a('string').and.to.equal('HKD');
-
-                done();
+                var order = res.body;
+                var status = "ASSIGNING";
+                validate(done, res, order, trip, isSurcharge, status);
             })
             .catch(err => {
-                console.log('error: ' + err.message);
-                console.log('max retry attempts: ' + RETRY);
-            });
-    }
-
-    function fetchOrderAndValidate(done, order, trip, status) {
-        api.get(ENDPOINT + '/v1/orders/' + order.id)
-            .then(res => {
-                // check status code
-                expect(res.statusCode).to.equal(200);
-
-                // check all fields exist
-                expect(res.body).to.have.keys(['id', 'stops', 'drivingDistancesInMeters', 'fare', 'status', 'orderDateTime', 'createdTime']);
-
-                // check id (int)
-                expect(res.body.id).to.be.a('number').and.to.equal(order.id);
-
-                // check stops (array)
-                expect(res.body.stops).to.be.an('array');
-                expect(res.body.stops.length).to.equal(trip.stops.length);
-                for (var i in res.body.stops) {
-                    expect(res.body.stops[i]).to.have.keys(['lat', 'lng']);
-                    expect(res.body.stops[i].lat).to.be.a('number');
-                    expect(res.body.stops[i].lng).to.be.a('number');
-                }
-
-                // check drivingDistancesInMeters (array)
-                var totalDistance = 0;
-                expect(res.body.drivingDistancesInMeters).to.be.an('array').and.to.be.equalTo(order.drivingDistancesInMeters);
-                for (var i in res.body.drivingDistancesInMeters) {
-                    expect(res.body.drivingDistancesInMeters[i]).to.be.a('number').and.to.equal(order.drivingDistancesInMeters[i]);
-                    totalDistance += res.body.drivingDistancesInMeters[i];
-                }
-
-                // check fare (object)
-                expect(res.body.fare).to.be.an('object')
-                expect(res.body.fare).to.have.property("amount");
-                expect(parseFloat(res.body.fare.amount)).to.be.a('number');
-                expect(checkFareAmount(parseFloat(res.body.fare.amount), totalDistance, null)).to.be.true;
-                expect(res.body.fare).to.have.property("currency").and.to.be.a('string').and.to.equal('HKD');
-
-                // check status
-                expect(res.body.status).to.be.a('string').and.to.equal(status);
-
-                // check dateTime
-                var orderDateTime = new Date(res.body.orderDateTime);
-                var createdTime = new Date(res.body.createdTime);
-                expect(orderDateTime >= createdTime).to.be.true;
-
-                done();
-            })
-            .catch(err => {
-                console.log('error: ' + err.message);
-                console.log('max retry attempts: ' + RETRY);
+                printError(done, err);
             });
     };
 
+    /**
+      * @desc make api call to fetch order and validate
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param object $trip - trip object from api request payload
+      * @param bool $isSurcharge - is between 5am - 9pm
+      * @param STATUS $status - one of the statuses for assertion
+      * @param function $validate - validation function to use
+      * @return none
+    **/
+    function fetchOrderAndValidate(done, order, trip, isSurcharge, status, validate) {
+        api.get('/v1/orders/' + order.id)
+            .then(res => {
+                validate(done, res, order, trip, isSurcharge, status);
+            })
+            .catch(err => {
+                printError(done, err);
+            });
+    };
+
+    /**
+      * @desc make api call to take order and validate
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param function $validate - validation function to use
+      * @return none
+    **/
+    function takeOrderAndValidate(done, order, validate) {
+        var status = STATUS.ONGOING;
+        putOrder(done, order, status, validate);
+    };
+
+    /**
+      * @desc make api call to complete order and validate
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param function $validate - validation function to use
+      * @return none
+    **/
+    function completeOrderAndValidate(done, order, validate) {
+        var status = STATUS.COMPLETED;
+        putOrder(done, order, status, validate);
+    };
+
+    /**
+      * @desc make api call to cancel order and validate
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param function $validate - validation function to use
+      * @return none
+    **/
+    function cancelOrderAndValidate(done, order, validate) {
+        var status = STATUS.CANCELLED;
+        putOrder(done, order, status, validate);
+    };
+
+    /**
+      * @desc make api call to put order (take, complete, or cancel) and validate
+      * @param function $done - indicate test is completed (passed from higher level function)
+      * @param object $order - order object from api response
+      * @param STATUS $status - one of the statuses for assertion
+      * @param function $validate - validation function to use
+      * @return none
+    **/
+    function putOrder(done, order, status, validate) {
+        var action = 'cancel';
+
+        switch(status) {
+            case STATUS.ONGOING:
+                action = 'take';
+                break;
+            case STATUS.COMPLETED:
+                action = 'complete';
+                break;
+            case STATUS.CANCELLED:
+                action = 'cancel';
+                break;
+            default:
+                action = 'cancel';
+        }
+
+        api.put('/v1/orders/' + order.id + '/' + action)
+            .set('Accept', 'application/json')
+            .then(res => {
+                validate(done, res, order, status);
+            })
+            .catch(err => {
+                printError(done, err);
+            });
+    }
+
+    /**
+      * Test suite for creating orders
+    **/
     describe('POST /v1/orders', function () {
         it('should create order successfully with orderAt and return correct fields and types', function(done) {
             var isSurcharge = false;
             var trip = prepareTrip(null, isSurcharge);
 
-            createOrderAndValidate(done, trip, isSurcharge);
+            createOrderAndValidate(done, trip, isSurcharge, validateCreatedOrder);
         });
 
         it('should create order successfully without orderAt', function(done) {
             var isSurcharge = null;
             var trip = prepareTrip(null, isSurcharge);
 
-            createOrderAndValidate(done, trip, isSurcharge);
+            createOrderAndValidate(done, trip, isSurcharge, validateCreatedOrder);
         });
 
         it('should create order successfully with more than 10 stops', function(done) {
             var isSurcharge = false;
             var trip = prepareTrip(generateRandomInteger(11,20), isSurcharge);
 
-            createOrderAndValidate(done, trip, isSurcharge);
+            createOrderAndValidate(done, trip, isSurcharge, validateCreatedOrder);
         });
 
         it('should create order successfully with correct fare between 5am to 9pm', function(done) {
             var isSurcharge = false;
             var trip = prepareTrip(null, isSurcharge);
 
-            createOrderAndValidate(done, trip, isSurcharge);
+            createOrderAndValidate(done, trip, isSurcharge, validateCreatedOrder);
         });
 
         it('should create order successfully with correct fare between 9pm to 5am', function(done) {
             var isSurcharge = true;
             var trip = prepareTrip(null, isSurcharge);
 
-            createOrderAndValidate(done, trip, isSurcharge);
+            createOrderAndValidate(done, trip, isSurcharge, validateCreatedOrder);
         });
 
         it('should fail to create order if only one stop', function(done) {
             var trip = prepareTrip(0, null);
 
-            api.post(ENDPOINT + '/v1/orders')
+            api.post('/v1/orders')
                 .set('Accept', 'application/json')
                 .send(trip)
-                .catch(err => {
+                .ok(res => res.status == 400)
+                .then(res => {
                     // check status code
-                    expect(err.response.res.statusCode).to.equal(400);
+                    expect(res.statusCode).to.equal(400);
 
                     // check error message
-                    expect(err.response.res.text).to.have.string('error');
-                    expect(err.response.res.text).to.have.string('stops');
+                    expect(res.body.message).to.have.string('error');
+                    expect(res.body.message).to.have.string('stops');
 
                     done();
+                })
+                .catch(err => {
+                    printError(done, err);
                 });
         });
 
@@ -268,570 +477,371 @@ describe('Order', function () {
 
             var trip = prepareTrip(null, null, invalidLatLng);
 
-            api.post(ENDPOINT + '/v1/orders')
+            api.post('/v1/orders')
                 .set('Accept', 'application/json')
                 .send(trip)
-                .catch(err => {
+                .ok(res => res.status == 503)
+                .then(res => {
                     // check status code
-                    expect(err.response.res.statusCode).to.equal(503);
+                    expect(res.statusCode).to.equal(503);
 
                     // check error message
-                    expect(err.response.res.text).to.have.string('Service Unavailable');
+                    expect(res.body.message).to.have.string('Service Unavailable');
 
                     done();
+                })
+                .catch(err => {
+                    printError(done, err);
                 });
         });
 
         it('should fail to create order if payload is missing', function(done) {
-            api.post(ENDPOINT + '/v1/orders')
+            api.post('/v1/orders')
                 .set('Accept', 'application/json')
-                .catch(err => {
+                .ok(res => res.status == 400)
+                .then(res => {
                     // check status code
-                    expect(err.response.res.statusCode).to.equal(400);
+                    expect(res.statusCode).to.equal(400);
 
                     // check error message
-                    expect(JSON.parse(err.response.res.text).message).to.be.a('string').that.is.empty;
+                    expect(res.body.message).to.be.a('string').that.is.empty;
 
                     done();
+                })
+                .catch(err => {
+                    printError(done, err);
                 });
         });
     });
 
+    /**
+      * Test suite for fetching orders
+    **/
     describe('GET /v1/orders/{orderID}', function () {
         var trip = prepareTrip(null, null);
-        var order;
-
-        beforeEach(function (done) {
-            // prepare for orders data
-            api.post(ENDPOINT + '/v1/orders')
-                .set('Accept', 'application/json')
-                .send(trip)
-                .then(res => {
-                    order = res.body;
-                    done();
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
-                });
-        });
+        var isSurcharge = null;
 
         it('should fetch order details successfully if order is ASSIGNING and return correct fields and types', function(done) {
-            fetchOrderAndValidate(done, order, trip, "ASSIGNING");
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                fetchOrderAndValidate(done, order, trip, isSurcharge, status, validateFetchedOrder)
+            });
         });
 
         it('should fetch order details successfully if order is ONGOING and return correct fields and types', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    fetchOrderAndValidate(done, order, trip, "ONGOING");
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                takeOrderAndValidate(done, order, function(done, res, order, status){
+                    fetchOrderAndValidate(done, order, trip, isSurcharge, status, validateFetchedOrder);
                 });
+            });
         });
 
         it('should fetch order details successfully if order is CANCELLED and return correct fields and types', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/cancel')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    fetchOrderAndValidate(done, order, trip, "CANCELLED");
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                cancelOrderAndValidate(done, order, function(done, res, order, status){
+                    fetchOrderAndValidate(done, order, trip, isSurcharge, status, validateFetchedOrder);
                 });
+            });
         });
 
         it('should fetch order details successfully if order is COMPLETED and return correct fields and types', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/complete')
-                        .set('Accept', 'application/json')
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(200);
-
-                            fetchOrderAndValidate(done, order, trip, "COMPLETED");
-                        })
-                        .catch(err => {
-                            console.log('error: ' + err.message);
-                            console.log('max retry attempts: ' + RETRY);
-                        });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                takeOrderAndValidate(done, order, function(done, res, order, status){
+                    completeOrderAndValidate(done, order, function(done, res, order, status){
+                        fetchOrderAndValidate(done, order, trip, isSurcharge, status, validateFetchedOrder);
+                    });
                 });
+            });
         });
 
         it('should fail to fetch order if order does not exist', function(done) {
-            api.get(ENDPOINT + '/v1/orders/' + order.id + 1)
-                .catch(err => {
-                    // check status code
-                    expect(err.response.res.statusCode).to.equal(404);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                api.get('/v1/orders/' + order.id + 1)
+                    .ok(res => res.status == 404)
+                    .then(res => {
+                        // check status code
+                        expect(res.statusCode).to.equal(404);
 
-                    done();
-                });
+                        done();
+                    })
+                    .catch(err => {
+                        printError(done, err);
+                    });
+            });
         });
     });
 
+    /**
+      * Test suite for taking orders
+    **/
     describe('PUT /v1/orders/{orderID}/take', function () {
         var trip = prepareTrip(null, null);
-        var order;
-
-        beforeEach(function (done) {
-            // prepare for orders data
-            api.post(ENDPOINT + '/v1/orders')
-                .set('Accept', 'application/json')
-                .send(trip)
-                .then(res => {
-                    order = res.body;
-                    done();
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
-                });
-        });
+        var isSurcharge = null;
 
         it('should take order successfully if order is ASSIGNING and return correct fields and types', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    // check all fields exist
-                    expect(res.body).to.have.keys(['id', 'status', 'ongoingTime']);
-
-                    // check id (int)
-                    expect(res.body.id).to.be.a('number').and.to.equal(order.id);
-
-                    // check status
-                    expect(res.body.status).to.be.a('string').and.to.equal("ONGOING");
-
-                    done();
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
-                });
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                takeOrderAndValidate(done, order, validateTakenOrder);
+            });
         });
 
         it('should fail to take order if order does not exist', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + 1 + '/take')
-                .catch(err => {
-                    // check status code
-                    expect(err.response.res.statusCode).to.equal(404);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                api.put('/v1/orders/' + order.id + 1 + '/take')
+                    .ok(res => res.status == 404)
+                    .then(res => {
+                        // check status code
+                        expect(res.statusCode).to.equal(404);
 
-                    // check error message
-                    expect(err.response.res.text).to.have.string('ORDER_NOT_FOUND');
+                        // check error message
+                        expect(res.body.message).to.have.string('ORDER_NOT_FOUND');
 
-                    done();
-                });
+                        done();
+                    })
+                    .catch(err => {
+                        printError(done, err);
+                    });
+            });
         });
 
         it('should fail to take order if order is already ONGOING', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                        .catch(err => {
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                takeOrderAndValidate(done, order, function(done, res, order, status) {
+                    api.put('/v1/orders/' + order.id + '/take')
+                        .ok(res => res.status == 422)
+                        .then(res => {
                             // check status code
-                            expect(err.response.res.statusCode).to.equal(422);
+                            expect(res.statusCode).to.equal(422);
 
                             // check error message
-                            expect(err.response.res.text).to.have.string('not ASSIGNING');
+                            expect(res.body.message).to.have.string('not ASSIGNING');
 
                             done();
+                        })
+                        .catch(err => {
+                            printError(done, err);
                         });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
                 });
+            });
         });
 
         it('should fail to take order if order is CANCELLED', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/cancel')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                        .catch(err => {
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                cancelOrderAndValidate(done, order, function(done, res, order, status) {
+                    api.put('/v1/orders/' + order.id + '/take')
+                        .ok(res => res.status == 422)
+                        .then(res => {
                             // check status code
-                            expect(err.response.res.statusCode).to.equal(422);
+                            expect(res.statusCode).to.equal(422);
 
                             // check error message
-                            expect(err.response.res.text).to.have.string('not ASSIGNING');
+                            expect(res.body.message).to.have.string('not ASSIGNING');
 
                             done();
+                        })
+                        .catch(err => {
+                            printError(done, err);
                         });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
                 });
+            });
         });
 
         it('should fail to take order if order is COMPLETED', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                takeOrderAndValidate(done, order, function(done, res, order, status){
+                    completeOrderAndValidate(done, order, function(done, res, order, status){
+                        api.put('/v1/orders/' + order.id + '/take')
+                            .ok(res => res.status == 422)
+                            .then(res => {
+                                // check status code
+                                expect(res.statusCode).to.equal(422);
 
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/complete')
-                        .set('Accept', 'application/json')
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(200);
+                                // check error message
+                                expect(res.body.message).to.have.string('not ASSIGNING');
 
-                            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                                .catch(err => {
-                                    // check status code
-                                    expect(err.response.res.statusCode).to.equal(422);
-
-                                    // check error message
-                                    expect(err.response.res.text).to.have.string('not ASSIGNING');
-
-                                    done();
-                                });
-                        })
-                        .catch(err => {
-                            console.log('error: ' + err.message);
-                            console.log('max retry attempts: ' + RETRY);
-                        });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
+                                done();
+                            })
+                            .catch(err => {
+                                printError(done, err);
+                            });
+                    });
                 });
+            });
+
         });
     });
 
+    /**
+      * Test suite for completing orders
+    **/
     describe('PUT /v1/orders/{orderID}/complete', function () {
         var trip = prepareTrip(null, null);
-        var order;
-
-        beforeEach(function (done) {
-            // prepare for orders data
-            api.post(ENDPOINT + '/v1/orders')
-                .set('Accept', 'application/json')
-                .send(trip)
-                .then(res => {
-                    order = res.body;
-                    done();
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
-                });
-        });
+        var isSurcharge = null;
 
         it('should complete order successfully if order is ONGOING and return correct fields and types', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/complete')
-                        .set('Accept', 'application/json')
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(200);
-
-                            // check all fields exist
-                            expect(res.body).to.have.keys(['id', 'status', 'completedAt']);
-
-                            // check id (int)
-                            expect(res.body.id).to.be.a('number').and.to.equal(order.id);
-
-                            // check status
-                            expect(res.body.status).to.be.a('string').and.to.equal("COMPLETED");
-
-                            done();
-                        })
-                        .catch(err => {
-                            console.log('error: ' + err.message);
-                            console.log('max retry attempts: ' + RETRY);
-                        });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                takeOrderAndValidate(done, order, function(done, res, order, status){
+                    completeOrderAndValidate(done, order, validateCompletedOrder);
                 });
+            });
         });
 
         it('should fail to complete order if order does not exist', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + 1 + '/complete')
-                .set('Accept', 'application/json')
-                .catch(err => {
-                    // check status code
-                    expect(err.response.res.statusCode).to.equal(404);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                api.put('/v1/orders/' + order.id + 1 + '/complete')
+                    .set('Accept', 'application/json')
+                    .ok(res => res.status == 404)
+                    .then(res => {
+                        // check status code
+                        expect(res.statusCode).to.equal(404);
 
-                    // check error message
-                    expect(err.response.res.text).to.have.string('ORDER_NOT_FOUND');
+                        // check error message
+                        expect(res.body.message).to.have.string('ORDER_NOT_FOUND');
 
-                    done();
-                });
+                        done();
+                    })
+                    .catch(err => {
+                        printError(done, err);
+                    });
+            });
         });
 
         it('should fail to complete order if order is ASSIGNING', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/complete')
-                .set('Accept', 'application/json')
-                .catch(err => {
-                    // check status code
-                    expect(err.response.res.statusCode).to.equal(422);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                api.put('/v1/orders/' + order.id + '/complete')
+                    .set('Accept', 'application/json')
+                    .ok(res => res.status == 422)
+                    .then(res => {
+                        // check status code
+                        expect(res.statusCode).to.equal(422);
 
-                    // check error message
-                    expect(err.response.res.text).to.have.string('not ONGOING');
+                        // check error message
+                        expect(res.body.message).to.have.string('not ONGOING');
 
-                    done();
-                });
+                        done();
+                    })
+                    .catch(err => {
+                        printError(done, err);
+                    });
+            });
         });
 
         it('should fail to complete order if order is CANCELLED', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/cancel')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/complete')
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                cancelOrderAndValidate(done, order, function(done, res, order, status){
+                    api.put('/v1/orders/' + order.id + '/complete')
                         .set('Accept', 'application/json')
-                        .catch(err => {
+                        .ok(res => res.status == 422)
+                        .then(res => {
                             // check status code
-                            expect(err.response.res.statusCode).to.equal(422);
+                            expect(res.statusCode).to.equal(422);
 
                             // check error message
-                            expect(err.response.res.text).to.have.string('not ONGOING');
+                            expect(res.body.message).to.have.string('not ONGOING');
 
                             done();
+                        })
+                        .catch(err => {
+                            printError(done, err);
                         });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
                 });
+            });
         });
 
         it('should fail to complete order if order is already COMPLETED', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                takeOrderAndValidate(done, order, function(done, res, order, status){
+                    completeOrderAndValidate(done, order, function(done, res, order, status){
+                        api.put('/v1/orders/' + order.id + '/complete')
+                            .set('Accept', 'application/json')
+                            .ok(res => res.status == 422)
+                            .then(res => {
+                                // check status code
+                                expect(res.statusCode).to.equal(422);
 
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/complete')
-                        .set('Accept', 'application/json')
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(200);
+                                // check error message
+                                expect(res.body.message).to.have.string('not ONGOING');
 
-                            api.put(ENDPOINT + '/v1/orders/' + order.id + '/complete')
-                                .set('Accept', 'application/json')
-                                .catch(err => {
-                                    // check status code
-                                    expect(err.response.res.statusCode).to.equal(422);
-
-                                    // check error message
-                                    expect(err.response.res.text).to.have.string('not ONGOING');
-
-                                    done();
-                                });
-                        })
-                        .catch(err => {
-                            console.log('error: ' + err.message);
-                            console.log('max retry attempts: ' + RETRY);
-                        });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
+                                done();
+                            })
+                            .catch(err => {
+                                printError(done, err);
+                            });
+                    });
                 });
+            });
         });
     });
 
+    /**
+      * Test suite for cancelling orders
+    **/
     describe('PUT /v1/orders/{orderID}/cancel', function () {
         var trip = prepareTrip(null, null);
-        var order;
-
-        beforeEach(function (done) {
-            // prepare for orders data
-            api.post(ENDPOINT + '/v1/orders')
-                .set('Accept', 'application/json')
-                .send(trip)
-                .then(res => {
-                    order = res.body;
-                    done();
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
-                });
-        });
+        var isSurcharge = null;
 
         it('should cancel order successfully if order is ASSIGNING and return correct fields and types', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/cancel')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    // check all fields exist
-                    expect(res.body).to.have.keys(['id', 'status', 'cancelledAt']);
-
-                    // check id (int)
-                    expect(res.body.id).to.be.a('number').and.to.equal(order.id);
-
-                    // check status
-                    expect(res.body.status).to.be.a('string').and.to.equal("CANCELLED");
-
-                    done();
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
-                });
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                cancelOrderAndValidate(done, order, validateCancelledOrder);
+            });
         });
 
         it('should cancel order successfully if order is ONGOING', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/cancel')
-                        .set('Accept', 'application/json')
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(200);
-
-                            // check all fields exist
-                            expect(res.body).to.have.keys(['id', 'status', 'cancelledAt']);
-
-                            // check id (int)
-                            expect(res.body.id).to.be.a('number').and.to.equal(order.id);
-
-                            // check status
-                            expect(res.body.status).to.be.a('string').and.to.equal("CANCELLED");
-
-                            done();
-                        })
-                        .catch(err => {
-                            console.log('error: ' + err.message);
-                            console.log('max retry attempts: ' + RETRY);
-                        });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                takeOrderAndValidate(done, order, function(done, res, order, status){
+                    cancelOrderAndValidate(done, order, validateCancelledOrder);
                 });
+            });
         });
 
         it('should cancel order successfully if order is already CANCELLED', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/cancel')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
-
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/cancel')
-                        .set('Accept', 'application/json')
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(200);
-
-                            // check all fields exist
-                            expect(res.body).to.have.keys(['id', 'status', 'cancelledAt']);
-
-                            // check id (int)
-                            expect(res.body.id).to.be.a('number').and.to.equal(order.id);
-
-                            // check status
-                            expect(res.body.status).to.be.a('string').and.to.equal("CANCELLED");
-
-                            done();
-                        })
-                        .catch(err => {
-                            console.log('error: ' + err.message);
-                            console.log('max retry attempts: ' + RETRY);
-                        });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                cancelOrderAndValidate(done, order, function(done, res, order, status){
+                    cancelOrderAndValidate(done, order, validateCancelledOrder);
                 });
+            });
         });
 
         it('should fail to cancel order if order does not exist', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + 1 + '/cancel')
-                .set('Accept', 'application/json')
-                .catch(err => {
-                    // check status code
-                    expect(err.response.res.statusCode).to.equal(404);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                api.put('/v1/orders/' + order.id + 1 + '/cancel')
+                    .set('Accept', 'application/json')
+                    .ok(res => res.status == 404)
+                    .then(res => {
+                        // check status code
+                        expect(res.statusCode).to.equal(404);
 
-                    // check error message
-                    expect(err.response.res.text).to.have.string('ORDER_NOT_FOUND');
+                        // check error message
+                        expect(res.body.message).to.have.string('ORDER_NOT_FOUND');
 
-                    done();
-                });
+                        done();
+                    })
+                    .catch(err => {
+                        printError(done, err);
+                    });
+            });
         });
 
         it('should fail to cancel order if order is COMPLETED', function(done) {
-            api.put(ENDPOINT + '/v1/orders/' + order.id + '/take')
-                .set('Accept', 'application/json')
-                .then(res => {
-                    // check status code
-                    expect(res.statusCode).to.equal(200);
+            createOrderAndValidate(done, trip, isSurcharge, function(done, res, order, trip, isSurcharge, status) {
+                takeOrderAndValidate(done, order, function(done, res, order, status){
+                    completeOrderAndValidate(done, order, function(done, res, order, status){
+                        api.put('/v1/orders/' + order.id + '/cancel')
+                            .set('Accept', 'application/json')
+                            .ok(res => res.status == 422)
+                            .then(res => {
+                                // check status code
+                                expect(res.statusCode).to.equal(422);
 
-                    api.put(ENDPOINT + '/v1/orders/' + order.id + '/complete')
-                        .set('Accept', 'application/json')
-                        .then(res => {
-                            // check status code
-                            expect(res.statusCode).to.equal(200);
+                                // check error message
+                                expect(res.body.message).to.have.string('COMPLETED already');
 
-                            api.put(ENDPOINT + '/v1/orders/' + order.id + '/cancel')
-                                .set('Accept', 'application/json')
-                                .catch(err => {
-                                    // check status code
-                                    expect(err.response.res.statusCode).to.equal(422);
-
-                                    // check error message
-                                    expect(err.response.res.text).to.have.string('COMPLETED already');
-
-                                    done();
-                                });
-                        })
-                        .catch(err => {
-                            console.log('error: ' + err.message);
-                            console.log('max retry attempts: ' + RETRY);
-                        });
-                })
-                .catch(err => {
-                    console.log('error: ' + err.message);
-                    console.log('max retry attempts: ' + RETRY);
+                                done();
+                            })
+                            .catch(err => {
+                                printError(done, err);
+                            });
+                    });
                 });
+            });
         });
     });
 });

@@ -10,11 +10,11 @@
         "mocha": "^5.2.0",
         "moment-timezone": "^0.5.21",
         "random-location": "^1.0.12",
-        "superagent": "^3.8.3"
+        "supertest": "^3.3.0"
     },
     "scripts": {
         "prestart": "npm install;",
-        "start": "JUNIT_REPORT_PATH=test-result/result.xml JUNIT_REPORT_STACK=1 mocha --timeout 2500 --colors || true"
+        "start": "mocha --timeout 2500 --colors || true"
     },
     "repository": {
         "type": "git",
