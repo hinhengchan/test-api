@@ -1,11 +1,10 @@
 {
-    "name": "api-test",
+    "name": "test-api",
     "version": "1.0.0",
     "description": "API Test",
     "author": "Henry Chan",
     "dependencies": {
-        "body-parser": "^1.17.1",
-        "chai": "^3.5.0",
+        "chai": "^4.2.0",
         "chai-arrays": "^2.0.0",
         "mocha": "^5.2.0",
         "moment-timezone": "^0.5.21",
@@ -13,12 +12,11 @@
         "supertest": "^3.3.0"
     },
     "scripts": {
-        "prestart": "npm install;",
-        "start": "mocha --timeout 2500 --colors || true"
+        "test": "node_modules/.bin/mocha --timeout 2500"
     },
     "repository": {
         "type": "git",
-        "url": "git@github.com:hinhengchan/api-test.git"
+        "url": "git@github.com:hinhengchan/test-api.git"
     },
     "license": "MIT"
 }

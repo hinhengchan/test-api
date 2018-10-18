@@ -5,8 +5,10 @@ var chai = require('chai'),
     chai.use(assertArrays),
     randomLocation = require('random-location'),
     moment = require('moment-timezone'),
-    supertest = require('supertest');
-    api = supertest('http://localhost:51544');
+    supertest = require('supertest'),
+    // endpoint is default as http://localhost:51544, but can be overridden with process.env.npm_config_endpoint
+    // eg. `npm --endpoint=http://localhost:51544 test`
+    api = supertest(process.env.npm_config_endpoint ? process.env.npm_config_endpoint : 'http://localhost:51544');
 
 describe('Order', function () {
     // office location - Lai Chi Kok
@@ -18,8 +20,9 @@ describe('Order', function () {
     const RADIUS = 10000;
     // tolerance for amount calculation
     const TOLERANCE = 0.01;
-    // retry x times
-    const RETRY = 1;
+    // retry is default as 3, but can be overridden with process.env.npm_config_retry
+    // eg. `npm --retry=1 test`
+    const RETRY = process.env.npm_config_retry ? process.env.npm_config_retry : 3;
     // order status
     const STATUS = {
         ASSIGNING : "ASSIGNING",
