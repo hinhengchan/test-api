@@ -3,7 +3,7 @@
 ## Installation
 Clone the repository
 ```bash
-$ git clone git@github.com:hinhengchan/test-api.git
+$ git clone https://github.com/hinhengchan/test-api.git
 ```
 
 Install package
